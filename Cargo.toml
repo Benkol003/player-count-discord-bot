@@ -1,13 +1,13 @@
 [package]
 name = "player-count-discord-bot"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
 a2s = { version = "0.5.2", features = ["async"] }
 anyhow = "1.0.86"
+crossterm = "0.27.0"
 humantime = "2.1.0"
-notify = "6.1.1"
 serde = { version = "1.0.204", features = ["derive"] }
 serenity = { version = "0.12.2", features = ["gateway", "utils"] }
 thiserror = "1.0.63"
@@ -17,3 +17,8 @@ toml = "0.8.14"
 
 [patch.crates-io]
 a2s = { path = "./lib/a2s-rs" }
+
+[profile.release]
+strip = true
+incremental = true
+panic = "abort"

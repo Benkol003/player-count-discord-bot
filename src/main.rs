@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::default::Default;
-use std::fs;
-use std::io::{self,Write};
+use std::{fs, process};
+use std::io::{self,Write,stdout};
+use std::panic::{self,PanicInfo};
+use std::process::{Stdio,Command};
+use std::env;
 
 use a2s::{self, A2SClient};
+
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +24,10 @@ use tokio::time::{sleep, Duration};
 use tokio::{select, signal};
 
 use thiserror::Error;
+
+use crossterm::style::{Colors,Color,SetColors};
+use crossterm::ExecutableCommand;
+use crossterm::terminal::SetTitle;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -101,7 +109,7 @@ pub enum Error {
 }
 
 async fn watch_server(name: String, server: Server) -> anyhow::Result<()> {
-    validate(&server.apiKey).map_err(|_| Error::InvalidToken(server.apiKey.clone()))?; //messy! also should i add the server table name?
+    validate(&server.apiKey).map_err(|_| Error::InvalidToken(server.apiKey.clone()))?;
     let mut client = Client::builder(&server.apiKey, GatewayIntents::default())
         .event_handler(Handler)
         .await?;
@@ -120,8 +128,38 @@ async fn watch_server(name: String, server: Server) -> anyhow::Result<()> {
     }
 }
 
+//keeps the terminal window open after quitting
+//wont stay open if any of this panics aswell
+fn quit(msg: &PanicInfo<'_>) -> () {
+    println!("{}",msg);
+    println!("Press Enter to exit...");
+    io::stdout().flush().expect("Failed to flush stdout");
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read line");
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> () {
+
+
+    //boostraps the program onto conhost (using -b arg) to customise the window size
+    #[cfg(target_os = "windows")] {
+        let args: Vec<String> = env::args().collect();
+        if !args.iter().any(|i| i=="-b"){
+            Command::new("conhost")
+            .args(["cmd.exe" ,"/K","mode con cols=50 lines=3 && player-count-discord-bot.exe -b"])
+            .spawn()
+            .expect("failed to boostrap onto conhost.");
+            return;
+        } //else actually run the program
+    }
+
+    panic::set_hook(Box::new(&quit));
+    stdout().execute(SetTitle("Player Count Discord Bot")).unwrap();
+    stdout().execute(SetColors(Colors::new(Color::DarkGreen,Color::Black))).unwrap();
+
     let config_path = "./config.toml".to_string();
 
     //create config file if doesnt exist
@@ -175,21 +213,11 @@ async fn main() -> () {
                             println!("task error: {}",e);
                         }
                     }
-                    Err(task_err) => {
-                        if task_err.is_panic() {
-                            println!("task panicked: {}", task_err.to_string());
-                        }
+                    Err(_) => {//already prints the panic in quit() hook
                     }
                 }
             }
         };
     }
     //TODO hot reload if config file changes
-
-    println!("Press Enter to exit...");
-    io::stdout().flush().expect("Failed to flush stdout");
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .expect("Failed to read line");
 }
