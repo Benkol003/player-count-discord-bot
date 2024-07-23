@@ -1,3 +1,3 @@
 [submodule "lib/a2s-rs"]
 	path = lib/a2s-rs
-	url = git@github.com:Benkol003/a2s-rs.git
+	url = https://github.com/Benkol003/a2s-rs.git

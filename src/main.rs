@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::fs;
+use std::io::{self,Write};
 
 use a2s::{self, A2SClient};
 
@@ -141,7 +142,7 @@ async fn main() -> () {
         fs::write(&config_path, toml::to_string(&config).unwrap().as_str()).unwrap();
     } else {
         config.servers.drain(); //dont need the example server
-                                //deserialise toml
+        //deserialise toml
         for (name, value) in config_doc {
             if name == "refreshInterval" {
                 if let Value::String(v) = &value {
@@ -184,4 +185,11 @@ async fn main() -> () {
         };
     }
     //TODO hot reload if config file changes
+
+    println!("Press Enter to exit...");
+    io::stdout().flush().expect("Failed to flush stdout");
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read line");
 }
