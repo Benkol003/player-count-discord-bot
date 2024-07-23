@@ -8,6 +8,7 @@ a2s = { version = "0.5.2", features = ["async"] }
 anyhow = "1.0.86"
 crossterm = "0.27.0"
 humantime = "2.1.0"
+humantime-serde = "1.1.1"
 serde = { version = "1.0.204", features = ["derive"] }
 serenity = { version = "0.12.2", features = ["gateway", "utils"] }
 thiserror = "1.0.63"

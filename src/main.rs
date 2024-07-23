@@ -20,14 +20,14 @@ use serenity::Client;
 use toml::{Table, Value};
 
 use tokio::task::JoinSet;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep,Duration};
 use tokio::{select, signal};
 
 use thiserror::Error;
 
 use crossterm::style::{Colors,Color,SetColors};
 use crossterm::ExecutableCommand;
-use crossterm::terminal::SetTitle;
+use crossterm::terminal::{SetSize, SetTitle};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -51,7 +51,8 @@ impl Default for Server {
 //TODO cant get defaults to work with newtype pattern ie. #[serde(transparent)] with #[serde(default)]
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigLayout {
-    refreshInterval: String,
+    #[serde(with = "humantime_serde")]
+    refreshInterval: Duration,
     #[serde(flatten)] //gets rid of tables name
     servers: HashMap<String, Server>,
 }
@@ -61,7 +62,7 @@ impl Default for ConfigLayout {
         let mut map = HashMap::<String, Server>::new();
         map.insert("example-server".into(), Server::default());
         ConfigLayout {
-            refreshInterval: "30s".into(),
+            refreshInterval: Duration::new(30, 0),
             servers: map,
         }
     }
@@ -81,6 +82,7 @@ async fn server_activity(ctx: Context) -> () {
     loop {
         let guard = ctx.data.read().await;
         let addr = guard.get::<TMAddress>().unwrap();
+        let refresh_interval = guard.get::<TMRefreshInterval>().unwrap();
         let a2s = A2SClient::new().await.unwrap();
         let status: String;
         match a2s.info(addr).await {
@@ -92,14 +94,19 @@ async fn server_activity(ctx: Context) -> () {
             }
         }
         ctx.set_activity(Some(ActivityData::custom(status)));
-        sleep(Duration::from_secs(30)).await;
+        sleep(refresh_interval.clone()).await;
     }
 }
 
-//insert the server address into the context data of event handler
-struct TMAddress(String);
+//this is to insert data into the context of event handler
+struct TMAddress;
 impl TypeMapKey for TMAddress {
     type Value = String;
+}
+
+struct TMRefreshInterval;
+impl TypeMapKey for TMRefreshInterval {
+    type Value = Duration;
 }
 
 #[derive(Debug, Error)]
@@ -108,16 +115,11 @@ pub enum Error {
     InvalidToken(String),
 }
 
-async fn watch_server(name: String, server: Server) -> anyhow::Result<()> {
+async fn watch_server(name: String, server: Server, refresh_interval : Duration) -> anyhow::Result<()> {
     validate(&server.apiKey).map_err(|_| Error::InvalidToken(server.apiKey.clone()))?;
-    let mut client = Client::builder(&server.apiKey, GatewayIntents::default())
-        .event_handler(Handler)
-        .await?;
-    client
-        .data
-        .write()
-        .await
-        .insert::<TMAddress>(server.address);
+    let mut client = Client::builder(&server.apiKey, GatewayIntents::default()).event_handler(Handler).await?;
+    client.data.write().await.insert::<TMAddress>(server.address);
+    client.data.write().await.insert::<TMRefreshInterval>(refresh_interval);
     loop {
         match client.start().await {
             Ok(_) => {}
@@ -129,9 +131,7 @@ async fn watch_server(name: String, server: Server) -> anyhow::Result<()> {
 }
 
 //keeps the terminal window open after quitting
-//wont stay open if any of this panics aswell
-fn quit(msg: &PanicInfo<'_>) -> () {
-    println!("{}",msg);
+fn quit() -> () {
     println!("Press Enter to exit...");
     io::stdout().flush().expect("Failed to flush stdout");
     let mut input = String::new();
@@ -144,22 +144,25 @@ fn quit(msg: &PanicInfo<'_>) -> () {
 async fn main() -> () {
 
 
-    //boostraps the program onto conhost (using -b arg) to customise the window size
+    //boostrap the program onto conhost (using -b arg) to customise the window size
     #[cfg(target_os = "windows")] {
         let args: Vec<String> = env::args().collect();
         if !args.iter().any(|i| i=="-b"){
             Command::new("conhost")
-            .args(["cmd.exe" ,"/K","mode con cols=50 lines=3 && player-count-discord-bot.exe -b"])
+            .args(["cmd.exe" ,"/K","mode con cols=50 lines=10 && player-count-discord-bot.exe -b && exit"])
             .spawn()
             .expect("failed to boostrap onto conhost.");
             return;
         } //else actually run the program
     }
 
-    panic::set_hook(Box::new(&quit));
-    stdout().execute(SetTitle("Player Count Discord Bot")).unwrap();
+    panic::set_hook(Box::new(|msg: &PanicInfo<'_>| {
+        println!("{}",msg);
+        quit();
+    }));
+    stdout().execute(SetTitle("Player Count Bots")).unwrap();
     stdout().execute(SetColors(Colors::new(Color::DarkGreen,Color::Black))).unwrap();
-
+    stdout().execute(SetSize(50,100)).unwrap(); //make screen buffer larger than the window, so can see print history.
     let config_path = "./config.toml".to_string();
 
     //create config file if doesnt exist
@@ -184,7 +187,7 @@ async fn main() -> () {
         for (name, value) in config_doc {
             if name == "refreshInterval" {
                 if let Value::String(v) = &value {
-                    config.refreshInterval = value.to_string();
+                    config.refreshInterval = v.parse::<humantime::Duration>().unwrap().into();
                 }
             } else if let Value::Table(v) = &value {
                 let s = value.try_into::<Server>().unwrap();
@@ -197,7 +200,7 @@ async fn main() -> () {
     for (name, server) in &config.servers {
         //spawn jobs for each server bot
         if server.enable {
-            tasks.spawn(watch_server(name.clone(), server.clone()));
+            tasks.spawn(watch_server(name.clone(), server.clone(), config.refreshInterval.clone()));
         }
     }
 
@@ -219,5 +222,6 @@ async fn main() -> () {
             }
         };
     }
+    quit();
     //TODO hot reload if config file changes
 }
