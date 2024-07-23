@@ -1,21 +1,24 @@
-use a2s::{self, A2SClient};
-use serde::{Deserialize, Serialize};
-use serenity::all::{validate_token, ActivityData, Context, EventHandler, GatewayIntents, Ready};
-use serenity::prelude::TypeMapKey;
-use serenity::{client, Client};
-use serenity::async_trait;
-use serenity::utils::token::validate;
 use std::collections::HashMap;
 use std::default::Default;
 use std::fs;
+
+use a2s::{self, A2SClient};
+
+use serde::{Deserialize, Serialize};
+
+use serenity::all::{ActivityData, Context, EventHandler, GatewayIntents, Ready};
+use serenity::async_trait;
+use serenity::prelude::TypeMapKey;
+use serenity::utils::token::validate;
+use serenity::Client;
+
 use toml::{Table, Value};
 
-use tokio::{select, signal};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
+use tokio::{select, signal};
 
-//TODO get rid of unwraps where possible
-
+use thiserror::Error;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -37,9 +40,6 @@ impl Default for Server {
 }
 
 //TODO cant get defaults to work with newtype pattern ie. #[serde(transparent)] with #[serde(default)]
-//TODO crashes when have global key in toml (not in a table)
-//maybe switch to toml_edit and parse by hand rather than using serialise?
-//or make own deserialiser
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigLayout {
     refreshInterval: String,
@@ -58,11 +58,9 @@ impl Default for ConfigLayout {
     }
 }
 
-
-
 struct Handler;
 #[async_trait]
-impl EventHandler for Handler{
+impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
         tokio::spawn(server_activity(ctx));
@@ -70,49 +68,52 @@ impl EventHandler for Handler{
 }
 
 //changes bots activity to show player count
-async fn server_activity(ctx: Context)-> () {
+async fn server_activity(ctx: Context) -> () {
     loop {
         let guard = ctx.data.read().await;
         let addr = guard.get::<TMAddress>().unwrap();
         let a2s = A2SClient::new().await.unwrap();
         let status: String;
-        match a2s.info(addr).await{
-            Ok(info) =>{
-                status = format!("Playing {}/{}",info.players,info.max_players);
-            },
-            Err(err)=>{
+        match a2s.info(addr).await {
+            Ok(info) => {
+                status = format!("Playing {}/{}", info.players, info.max_players);
+            }
+            Err(_) => {
                 status = "Offline".into();
             }
         }
         ctx.set_activity(Some(ActivityData::custom(status)));
         sleep(Duration::from_secs(30)).await;
     }
-
 }
 
 //insert the server address into the context data of event handler
 struct TMAddress(String);
-impl TypeMapKey for TMAddress{
+impl TypeMapKey for TMAddress {
     type Value = String;
 }
 
-async fn watch_server(name: String, server: Server) -> Result<(),String> {
-    if let Err(_) = validate(&server.apiKey) {
-        return Err(format!("Invalid api key '{}' for server {}.",server.apiKey,name));
-    }
-    let mut client : Client;
-    match Client::builder(&server.apiKey, GatewayIntents::default())
-    .event_handler(Handler).await{
-        Ok(c) => {client=c},
-        Err(err) => {return Err(err.to_string())}
-    };
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("Invalid discord api key '{0}'")]
+    InvalidToken(String),
+}
 
-    client.data.write().await.insert::<TMAddress>(server.address);
-    loop{
-        match client.start().await{
-            Ok(_)=>{},
+async fn watch_server(name: String, server: Server) -> anyhow::Result<()> {
+    validate(&server.apiKey).map_err(|_| Error::InvalidToken(server.apiKey.clone()))?; //messy! also should i add the server table name?
+    let mut client = Client::builder(&server.apiKey, GatewayIntents::default())
+        .event_handler(Handler)
+        .await?;
+    client
+        .data
+        .write()
+        .await
+        .insert::<TMAddress>(server.address);
+    loop {
+        match client.start().await {
+            Ok(_) => {}
             Err(err) => {
-                println!("Server {} crashed: {}. (Attempting restart)",name,err);
+                println!("Server {} crashed: {}. (Attempting restart)", name, err);
             }
         }
     }
@@ -128,7 +129,7 @@ async fn main() -> () {
     }
     let toml = fs::read_to_string("./config.toml").unwrap();
 
-    let config_doc: Table = toml::from_str(&toml).unwrap();
+    let config_doc: Table = toml::from_str(&toml).expect("config file doesn't contain valid TOML");
 
     let mut config = ConfigLayout::default();
 
@@ -140,41 +141,47 @@ async fn main() -> () {
         fs::write(&config_path, toml::to_string(&config).unwrap().as_str()).unwrap();
     } else {
         config.servers.drain(); //dont need the example server
-        //deserialise toml
-        for (name,value) in config_doc{
-            if name=="refreshInterval" {if let Value::String(v) = &value{
-                config.refreshInterval = value.to_string();
-            }} else if let Value::Table(v) = &value{
+                                //deserialise toml
+        for (name, value) in config_doc {
+            if name == "refreshInterval" {
+                if let Value::String(v) = &value {
+                    config.refreshInterval = value.to_string();
+                }
+            } else if let Value::Table(v) = &value {
                 let s = value.try_into::<Server>().unwrap();
-                config.servers.insert(name,s);
+                config.servers.insert(name, s);
             }
         }
     }
 
-    
     let mut tasks = JoinSet::new();
     for (name, server) in &config.servers {
         //spawn jobs for each server bot
         if server.enable {
-            tasks.spawn(watch_server(name.clone(),server.clone()));
+            tasks.spawn(watch_server(name.clone(), server.clone()));
         }
     }
 
-    signal::ctrl_c().await.unwrap();
-    
-    select! {
-        _ = signal::ctrl_c() => { tasks.abort_all();},
-        _ = tasks.join_next() => {}
-    }
-    while let Some(r) = tasks.join_next().await {
-        match r {
-            Ok(r) => {if let Err(e) = r{println!("{}",e);}}
-            Err(task_err) => {
-                if task_err.is_panic() {
-                    println!("task panicked: {}", task_err.to_string());
+    while !tasks.is_empty() {
+        select! {
+            _ = signal::ctrl_c() => {
+                tasks.abort_all();
+            },
+            Some(r) = tasks.join_next() => {
+                match r {
+                    Ok(r) => {
+                        if let Err(e) = r {
+                            println!("task error: {}",e);
+                        }
+                    }
+                    Err(task_err) => {
+                        if task_err.is_panic() {
+                            println!("task panicked: {}", task_err.to_string());
+                        }
+                    }
                 }
             }
-        }
+        };
     }
     //TODO hot reload if config file changes
 }
