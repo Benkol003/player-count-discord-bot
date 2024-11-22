@@ -1,10 +1,15 @@
 use std::collections::HashMap;
 use std::default::Default;
-use std::{fs, process};
+use std::{fs};
 use std::io::{self,Write,stdout};
-use std::panic::{self,PanicInfo};
-use std::process::{Stdio,Command};
+use std::panic::{self, PanicHookInfo};
+use std::process::{Command};
 use std::env;
+
+use simplelog::*;
+use log::LevelFilter;
+
+use log::{info,error,debug,warn};
 
 use a2s::{self, A2SClient};
 
@@ -89,7 +94,7 @@ async fn server_activity(ctx: Context) -> () {
             Ok(info) => {
                 status = format!("Playing {}/{}", info.players, info.max_players);
             }
-            Err(_) => {
+            Err(e) => {
                 status = "Offline".into();
             }
         }
@@ -124,7 +129,7 @@ async fn watch_server(name: String, server: Server, refresh_interval : Duration)
         match client.start().await {
             Ok(_) => {}
             Err(err) => {
-                println!("Server {} crashed: {}. (Attempting restart)", name, err);
+                error!("Server {} crashed: {}. (Attempting restart)", name, err);
             }
         }
     }
@@ -143,6 +148,9 @@ fn quit() -> () {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> () {
 
+    WriteLogger::init(LevelFilter::Warn, Config::default(),fs::OpenOptions::new().create(true).write(true).append(true).open("log.txt").unwrap()).unwrap();
+
+    warn!("startup");
 
     //boostrap the program onto conhost (using -b arg) to customise the window size
     #[cfg(target_os = "windows")] {
@@ -156,8 +164,8 @@ async fn main() -> () {
         } //else actually run the program
     }
 
-    panic::set_hook(Box::new(|msg: &PanicInfo<'_>| {
-        println!("{}",msg);
+    panic::set_hook(Box::new(|msg: &PanicHookInfo<'_>| {
+        error!("{msg}\n");
         quit();
     }));
     stdout().execute(SetTitle("Player Count Bots")).unwrap();
@@ -208,15 +216,17 @@ async fn main() -> () {
         select! {
             _ = signal::ctrl_c() => {
                 tasks.abort_all();
+                warn!("CTRL_C recieved, shutdown")
             },
             Some(r) = tasks.join_next() => {
                 match r {
                     Ok(r) => {
                         if let Err(e) = r {
-                            println!("task error: {}",e);
+                            error!("task error: {}\n",e);
                         }
                     }
-                    Err(_) => {//already prints the panic in quit() hook
+                    Err(e) => {//already prints the panic in quit() hook
+                        error!("{e}");
                     }
                 }
             }
