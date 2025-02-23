@@ -90,7 +90,6 @@ impl EventHandler for Handler {
 async fn server_activity(server: Server,refresh_interval: Duration, shard_manager: Arc<ShardManager>) -> () {
     let mut shard_restart = false;
     loop {
-
         if(shard_restart){
             warn!("[{}] restarting shard as in connecting stage, (typically gets stuck trying to reconnect)",&server.address);
             shard_manager.shutdown(ShardId(0),0).await;
@@ -129,8 +128,9 @@ async fn server_activity(server: Server,refresh_interval: Duration, shard_manage
                     shard_runner.runner_tx.set_activity(Some(ActivityData::custom(status)));
                 }
             }
-            sleep(refresh_interval).await;
         }
+        //dont sleep whilst holding the lock...
+        sleep(refresh_interval).await;
     }
 }
 
