@@ -78,7 +78,7 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        println!("{} is connected!", ready.user.name);
+        warn!("{} reconnected", ready.user.name);
     }
 
     async fn shard_stage_update(&self, ctx: Context, shard_update: ShardStageUpdateEvent) {
@@ -238,6 +238,7 @@ async fn main() -> () {
         //spawn jobs for each server bot
         if server.enable {
             tasks.spawn(watch_server(name.clone(), server.clone(), config.refreshInterval.clone()));
+            println!("Running: [{}]",&name);
         }
     }
 
