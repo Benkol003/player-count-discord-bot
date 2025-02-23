@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::default::Default;
+use std::sync::Arc;
 use std::{fs};
 use std::io::{self,Write,stdout};
 use std::panic::{self, PanicHookInfo};
@@ -16,7 +17,7 @@ use a2s::{self, A2SClient};
 
 use serde::{Deserialize, Serialize};
 
-use serenity::all::{ActivityData, Context, EventHandler, GatewayIntents, Ready};
+use serenity::all::{ActivityData, ChannelOverwriteAction, ConnectionStage, Context, EventHandler, GatewayIntents, Ready, ShardId, ShardManager, ShardRunner, ShardStageUpdateEvent};
 use serenity::async_trait;
 use serenity::prelude::TypeMapKey;
 use serenity::utils::token::validate;
@@ -78,40 +79,59 @@ struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
-        tokio::spawn(server_activity(ctx));
+    }
+
+    async fn shard_stage_update(&self, ctx: Context, shard_update: ShardStageUpdateEvent) {
+        warn!("{:?}",shard_update);
     }
 }
 
 //changes bots activity to show player count
-async fn server_activity(ctx: Context) -> () {
+async fn server_activity(server: Server,refresh_interval: Duration, shard_manager: Arc<ShardManager>) -> () {
+    let mut shard_restart = false;
     loop {
-        let guard = ctx.data.read().await;
-        let addr = guard.get::<TMAddress>().unwrap();
-        let refresh_interval = guard.get::<TMRefreshInterval>().unwrap();
-        let a2s = A2SClient::new().await.unwrap();
-        let status: String;
-        match a2s.info(addr).await {
-            Ok(info) => {
-                status = format!("Playing {}/{}", info.players, info.max_players);
+
+        if(shard_restart){
+            warn!("[{}] restarting shard as in connecting stage, (typically gets stuck trying to reconnect)",&server.address);
+            shard_manager.shutdown(ShardId(0),0).await;
+            match shard_manager.initialize() {
+                Ok(_) => {
+                    warn!("[{}] restarted shard",&server.address);
+                }
+                Err(err) => {
+                    warn!("[{}] failed to restart shard: {}",&server.address,err);
+                }
             }
-            Err(e) => {
-                status = "Offline".into();
+            shard_restart=false;
+        } else {
+            let shards_lock = shard_manager.runners.lock().await;
+            match shards_lock.get(&ShardId(0)) {
+                None => {
+                    warn!("{}: could not find shard with ID 0",&server.address);
+                }
+                Some(shard_runner) => {
+                    //TODO there has to be a better way to check if the shard reciever is gone, maybe check heartbeat
+                    if shard_runner.stage.is_connecting() {
+                        //shutting down shard will remove it from shardManager. If we call this with a lock on the shard runner then we get a deadlock.
+                        shard_restart=true; continue;
+                    }
+    
+                    let a2s = A2SClient::new().await.unwrap();
+                    let status: String;
+                    match a2s.info(&server.address).await {
+                        Ok(info) => {
+                            status = format!("Playing {}/{}", info.players, info.max_players);
+                        }
+                        Err(_) => {
+                            status = "Offline".into();
+                        }
+                    }
+                    shard_runner.runner_tx.set_activity(Some(ActivityData::custom(status)));
+                }
             }
+            sleep(refresh_interval).await;
         }
-        ctx.set_activity(Some(ActivityData::custom(status)));
-        sleep(refresh_interval.clone()).await;
     }
-}
-
-//this is to insert data into the context of event handler
-struct TMAddress;
-impl TypeMapKey for TMAddress {
-    type Value = String;
-}
-
-struct TMRefreshInterval;
-impl TypeMapKey for TMRefreshInterval {
-    type Value = Duration;
 }
 
 #[derive(Debug, Error)]
@@ -123,16 +143,25 @@ pub enum Error {
 async fn watch_server(name: String, server: Server, refresh_interval : Duration) -> anyhow::Result<()> {
     validate(&server.apiKey).map_err(|_| Error::InvalidToken(server.apiKey.clone()))?;
     let mut client = Client::builder(&server.apiKey, GatewayIntents::default()).event_handler(Handler).await?;
-    client.data.write().await.insert::<TMAddress>(server.address);
-    client.data.write().await.insert::<TMRefreshInterval>(refresh_interval);
-    loop {
-        match client.start().await {
-            Ok(_) => {}
-            Err(err) => {
-                error!("Server {} crashed: {}. (Attempting restart)", name, err);
+
+    let shard_manager = client.shard_manager.clone();
+
+    let _ = tokio::spawn(async move{
+        loop {
+            match client.start().await {
+                Ok(_) => {
+                    println!("started.");
+                }
+                Err(err) => {
+                    error!("Server {} crashed: {}. (Attempting restart)", name.clone(), err);
+                }
             }
         }
-    }
+    });
+
+    server_activity(server,refresh_interval,shard_manager).await;
+    warn!("server activity task stopped");
+    return Ok(());
 }
 
 //keeps the terminal window open after quitting
@@ -165,7 +194,7 @@ async fn main() -> () {
     }
 
     panic::set_hook(Box::new(|msg: &PanicHookInfo<'_>| {
-        error!("{msg}\n");
+        error!("panic: {msg}\n");
         quit();
     }));
     stdout().execute(SetTitle("Player Count Bots")).unwrap();
@@ -233,5 +262,4 @@ async fn main() -> () {
         };
     }
     quit();
-    //TODO hot reload if config file changes
 }
